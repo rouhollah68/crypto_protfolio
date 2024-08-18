@@ -9,11 +9,12 @@ from datetime import datetime
 from typing import List, Optional
 from market_data import MarketData
 import time
+import websocket
 
 class MarketAggregator:
     def __init__(self, symbols):
         self.symbols = [symbol.lower() for symbol in symbols]
-        self.base_url = "wss://fstream.binance.com/ws"
+        self.base_url = "wss://fstream.binance.com"
         self.trades_data = {symbol: pd.DataFrame() for symbol in self.symbols}
         self.orderbook_data = {symbol: pd.DataFrame() for symbol in self.symbols}
         self.quotes_data = {symbol: pd.DataFrame() for symbol in self.symbols}
@@ -34,23 +35,6 @@ class MarketAggregator:
                 else:
                     self.trades_data[symbol] = pd.concat([self.trades_data[symbol], new_trade])
                 
-    async def listen_to_quotes(self, symbol):
-        quote_url = f"{self.base_url}/{symbol}@bookTicker"
-        async with websockets.connect(quote_url) as websocket:
-            print(f"Listening to quotes for {symbol.upper()}...")
-            while True:
-                data = await websocket.recv()
-                quote_data = json.loads(data)
-                timestamp = datetime.now().replace(microsecond=0)
-                new_quote = pd.DataFrame({'B': [float(quote_data['b'])], 'A': [float(quote_data['a'])]}, index=[timestamp])
-                if not self.quotes_data[symbol].empty and self.quotes_data[symbol].index[-1] == timestamp:
-                    self.quotes_data[symbol].iloc[-1] = new_quote.iloc[0]
-                else:
-                    self.quotes_data[symbol] = pd.concat([self.quotes_data[symbol], new_quote])
-                # print(new_quote)
-
-                
-    
     async def listen_orderbook(self, symbol):
         orderbook_url = f"{self.base_url}/{symbol}@depth"
         async with websockets.connect(orderbook_url) as websocket:
@@ -78,6 +62,53 @@ class MarketAggregator:
                 else:
                     self.orderbook_data[symbol] = pd.concat([self.orderbook_data[symbol], df])
 
+    def listen_to_quotes(self):
+        streams = "/".join([f"{symbol.lower()}@bookTicker" for symbol in self.symbols])
+        quote_url = f"{self.base_url}/stream?streams={streams}"
+        print(quote_url)
+        time.sleep(1)
+        def on_message(ws, message):
+            quote_data = json.loads(message)['data']
+            symbol = quote_data['s'].lower()
+            bid = float(quote_data['b'])
+            ask = float(quote_data['a'])
+            event_time = datetime.fromtimestamp(quote_data['E'] / 1000)
+            self.quotes_data[symbol] = pd.concat([self.quotes_data[symbol], pd.DataFrame({'B': [bid], 'A': [ask]}, index=[event_time])])
+            # print(self.quotes_data[symbol])
+            
+        def on_open(ws):
+            for symbol in self.symbols:
+                print(f"Connection opened for {symbol.upper()}")
+
+        def on_close(ws):
+            for symbol in self.symbols:
+                print(f"Connection closed for {symbol.upper()}")
+
+        def on_error(ws, error):
+            for symbol in self.symbols:
+                print(f"Error for {symbol.upper()}: {error}")
+
+        def on_ping(ws, message):
+            for symbol in self.symbols:
+                print(f"Ping received for {symbol.upper()}")
+                ws.send(message, websocket.ABNF.OPCODE_PONG)
+                print(f"Sent pong: {message}")
+
+        def on_pong(ws, message):
+            for symbol in self.symbols:
+                print(f"Pong received for {symbol.upper()}")
+
+        wsapp = websocket.WebSocketApp(
+            quote_url,
+            on_message=on_message,
+            on_open=on_open,
+            on_close=on_close,
+            on_error=on_error,
+            on_ping=on_ping,
+            on_pong=on_pong
+        )
+        wsapp.run_forever(ping_interval=30, ping_timeout=10)
+
     def clean_data(self, df):
         df = df.resample('1s').agg(lambda x: x.sum() if 'V' in x.name else x.mean())
         if len(df) > 1000000:
@@ -91,10 +122,10 @@ class MarketAggregator:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         tasks = []
-        for symbol in self.symbols:
-            tasks.append(self.listen_trades(symbol))
-            tasks.append(self.listen_orderbook(symbol))
-            tasks.append(self.listen_to_quotes(symbol))
+        # for symbol in self.symbols:
+        #     tasks.append(self.listen_trades(symbol))
+        #     tasks.append(self.listen_orderbook(symbol))
+        threading.Thread(target=self.listen_to_quotes).start()  # Run listen_to_quotes in a separate thread
         self.loop.run_until_complete(asyncio.wait(tasks))
 
     def start_in_thread(self):
@@ -105,18 +136,38 @@ class MarketAggregator:
     def stop(self):
         if self.loop:
             self.loop.call_soon_threadsafe(self.loop.stop)
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.close()
         if self.thread:
             self.thread.join()
 
     def emit_market_data(self, symbol) -> Optional[MarketData]:
-        row = self.quotes_data[symbol].iloc[-1]
+        row = self.quotes_data[symbol.lower()].iloc[-1]
         return MarketData(
             timestamp=row.name,
-            best_bid=row['B'],
+            best_bid=float(row['B']),
             best_bid_volume=0,
-            best_ask=row['A'],
+            best_ask=float(row['A']),
             best_ask_volume=0,
-            asset=symbol
+            asset=symbol.upper()
         )
 
+if __name__ == '__main__':
+    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 
+    market_aggregator = MarketAggregator(symbols)
+    # market_aggregator.listen_to_quotes()
+    client_thread = market_aggregator.start_in_thread()
+    time.sleep(5)
+    def print_market_data(self):
+        while True:
+            time.sleep(1)
+            for symbol in self.symbols:
+                try:
+                    print(self.emit_market_data(symbol))
+                except Exception as e:
+                    print(e)
+
+
+    # Start the print_market_data method in a separate thread
+    threading.Thread(target=print_market_data, args=(market_aggregator,), daemon=True).start()

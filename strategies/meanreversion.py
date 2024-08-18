@@ -134,7 +134,7 @@ class AskBidMeanReversionStrategy(Strategy):
     
         
 class PortfolioMeanReversionStrategy(MeanReversionStrategy):
-    def __init__(self, assets, lookback_period=600, train_period=18000):
+    def __init__(self, assets, lookback_period=60, train_period=180):
         super().__init__(assets, lookback_period)
         self.weights = {asset: 0 for asset in assets}
         self.portfolio_value = np.zeros(self.lookback_period)
@@ -147,6 +147,7 @@ class PortfolioMeanReversionStrategy(MeanReversionStrategy):
         self.bid_history = {asset: [] for asset in self.assets}
         self.train_period = train_period
         self.portfolio_position = 0
+        self.num_std_dev = 3
    
     def on_event(self, params, market_data, pnl, assets_quantity):
        # print(market_data.timestamp)
@@ -163,16 +164,14 @@ class PortfolioMeanReversionStrategy(MeanReversionStrategy):
             self.bid_history[market_data.asset].pop(0)
         self.counter+=1
         
-        if len(self.price_history[market_data.asset]) >= self.train_period and self.counter % len(self.assets) == 0 and market_data.timestamp.time() > pd.Timestamp('09:10').time():
-            if market_data.timestamp.hour != self.start_time.hour:
-                self.weights = self.calculate_portfolio_weights()
-                self.start_time = market_data.timestamp
-
-            # Ensure there are enough data points
+        if len(self.price_history[market_data.asset]) >= self.train_period and self.counter % len(self.assets) == 0:
             if all(len(self.price_history[asset]) >= self.lookback_period for asset in self.assets):
+                self.weights = self.calculate_portfolio_weights()
+
                 self.portfolio_value = [sum(self.weights[asset] * self.price_history[asset][-i] for asset in self.assets) for i in range(self.lookback_period, 0, -1)]
                 self.portfolio_value_ask = [sum(self.weights[asset] * (self.ask_history[asset][-i] if self.weights[asset] > 0 else self.bid_history[asset][-i]) for asset in self.assets) for i in range(self.lookback_period, 0, -1)]
                 self.portfolio_value_bid = [sum(self.weights[asset] * (self.bid_history[asset][-i] if self.weights[asset] > 0 else self.ask_history[asset][-i]) for asset in self.assets) for i in range(self.lookback_period, 0, -1)]
+                
                 self.portfolio_moving_average = sum(self.portfolio_value) / len(self.portfolio_value)
                 if len(self.portfolio_value) > 1:
                     self.portfolio_std_dev = (sum((x - self.portfolio_moving_average)**2 for x in self.portfolio_value) / (len(self.portfolio_value)-1))**0.5
@@ -181,6 +180,9 @@ class PortfolioMeanReversionStrategy(MeanReversionStrategy):
 
                 current_price = self.portfolio_value[-1]
                 trades = {i: None for i in self.assets}
+                # print(f'current_price: {current_price}')
+                # print(f'portfolio_lower_band: {self.portfolio_lower_band}')
+                # print(f'portfolio_upper_band: {self.portfolio_upper_band}')
 
                 if current_price < self.portfolio_lower_band:
                     print('buy', self.portfolio_value_ask[-1])
